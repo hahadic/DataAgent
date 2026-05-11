@@ -15,12 +15,14 @@
  */
 package com.alibaba.cloud.ai.dataagent.agentscope.runtime;
 
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.ToolCallParam;
+import io.agentscope.core.tool.ToolExecutionContext;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
@@ -76,7 +78,7 @@ public class SpringToolCallbackAgentAdapter implements AgentTool {
 		}
 		catch (Exception ex) {
 			log.error("Spring AI tool callback execution failed. tool={}", getName(), ex);
-			return ToolResultBlock.error(ex.getMessage() == null ? "Tool execution failed." : ex.getMessage())
+			return ToolResultBlock.error(ex.getMessage() == null ? "工具执行失败。" : ex.getMessage())
 				.withIdAndName(toolCallParam.getToolUseBlock().getId(), getName());
 		}
 	}
@@ -85,6 +87,15 @@ public class SpringToolCallbackAgentAdapter implements AgentTool {
 		Map<String, Object> contextMap = new LinkedHashMap<>();
 		if (toolCallParam.getContext() != null) {
 			contextMap.put("agentScopeContext", toolCallParam.getContext());
+			ToolExecutionContext toolExecutionContext = toolCallParam.getContext();
+			AgentRequest agentRequest = toolExecutionContext.get("agentRequest", AgentRequest.class);
+			if (agentRequest != null) {
+				contextMap.put("graphRequest", agentRequest);
+			}
+			AgentRuntimeRequestMetadata requestMetadata = toolExecutionContext.get(AgentRuntimeRequestMetadata.class);
+			if (requestMetadata != null) {
+				contextMap.put("runtimeRequestMetadata", requestMetadata);
+			}
 		}
 		if (toolCallParam.getAgent() != null) {
 			contextMap.put("agentScopeAgent", toolCallParam.getAgent());

@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2026 the original author or authors.
+ * Copyright 2026 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,33 +13,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.alibaba.cloud.ai.dataagent.agentscope.dto;
+package com.alibaba.cloud.ai.dataagent.agentscope.tool.sqlguard;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
+import java.util.List;
 import lombok.Data;
-import lombok.NoArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 
 @Data
-@AllArgsConstructor
-@NoArgsConstructor
-@Builder
-public class GraphRequest {
+class SqlGuardCheckRequest {
 
-	private String agentId;
-
-	private String threadId;
-
-	private String runtimeRequestId;
+	private String action;
 
 	private String query;
 
-	private boolean humanFeedback;
+	private String sql;
 
 	private String humanFeedbackContent;
 
-	private boolean rejectedPlan;
+	private String tableName;
 
-	private boolean nl2sqlOnly;
+	private List<String> columnNames;
+
+	private Integer limit;
+
+	String normalizedAction() {
+		return StringUtils.defaultIfBlank(action, "SQL_VERIFY").trim().toUpperCase();
+	}
 
 }

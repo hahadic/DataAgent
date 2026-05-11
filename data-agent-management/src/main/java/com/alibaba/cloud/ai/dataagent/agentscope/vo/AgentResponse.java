@@ -16,6 +16,7 @@
 package com.alibaba.cloud.ai.dataagent.agentscope.vo;
 
 import com.alibaba.cloud.ai.dataagent.enums.TextType;
+import java.util.Map;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -25,7 +26,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
-public class GraphNodeResponse {
+public class AgentResponse {
 
 	private String agentId;
 
@@ -37,14 +38,16 @@ public class GraphNodeResponse {
 
 	private String text;
 
+	private Map<String, Object> metadata;
+
 	@Builder.Default
 	private boolean error = false;
 
 	@Builder.Default
 	private boolean complete = false;
 
-	public static GraphNodeResponse error(String agentId, String threadId, String text) {
-		return GraphNodeResponse.builder()
+	public static AgentResponse error(String agentId, String threadId, String text) {
+		return AgentResponse.builder()
 			.agentId(agentId)
 			.threadId(threadId)
 			.text(text)
@@ -53,8 +56,8 @@ public class GraphNodeResponse {
 			.build();
 	}
 
-	public static GraphNodeResponse complete(String agentId, String threadId) {
-		return GraphNodeResponse.builder()
+	public static AgentResponse complete(String agentId, String threadId) {
+		return AgentResponse.builder()
 			.agentId(agentId)
 			.threadId(threadId)
 			.complete(true)

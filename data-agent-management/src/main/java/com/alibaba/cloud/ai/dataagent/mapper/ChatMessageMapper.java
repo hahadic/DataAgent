@@ -36,32 +36,43 @@ public interface ChatMessageMapper {
 	@Select("""
 			SELECT * FROM chat_message
 			WHERE session_id = #{sessionId}
-			  AND LOWER(TRIM(COALESCE(message_type, ''))) <> 'memory-text'
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) NOT IN ('memory-text', 'answer-explain')
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) NOT LIKE 'agentscope-state:%'
 			ORDER BY create_time ASC
 			""")
 	List<ChatMessage> selectVisibleBySessionId(@Param("sessionId") String sessionId);
 
 	@Select("""
-			SELECT * FROM (
-			    SELECT * FROM chat_message
-			    WHERE session_id = #{sessionId}
-			      AND content IS NOT NULL
-			      AND TRIM(content) <> ''
-			      AND (
-			          LOWER(TRIM(COALESCE(message_type, ''))) = 'memory-text'
-			          OR (
-			              LOWER(TRIM(COALESCE(role, ''))) IN ('assistant', 'system', 'tool', 'user')
-			              AND LOWER(TRIM(COALESCE(message_type, ''))) NOT IN ('html', 'html-report', 'markdown-report', 'result-set')
-			              AND LOWER(TRIM(COALESCE(message_type, ''))) IN ('', 'text')
-			          )
-			      )
-			    ORDER BY create_time DESC
-			    LIMIT #{limit}
-			) recent_memory
-			ORDER BY create_time ASC
+			SELECT * FROM chat_message
+			WHERE session_id = #{sessionId}
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) = LOWER(#{messageType})
+			ORDER BY create_time DESC, id DESC
 			""")
-	List<ChatMessage> selectRecentMemoryEligibleBySessionId(@Param("sessionId") String sessionId,
-			@Param("limit") int limit);
+	List<ChatMessage> selectBySessionIdAndMessageType(@Param("sessionId") String sessionId,
+			@Param("messageType") String messageType);
+
+	@Select("""
+			SELECT * FROM chat_message
+			WHERE session_id = #{sessionId}
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) = LOWER(#{messageType})
+			ORDER BY create_time ASC, id ASC
+			""")
+	List<ChatMessage> selectStateBySessionIdAndMessageType(@Param("sessionId") String sessionId,
+			@Param("messageType") String messageType);
+
+	@Select("""
+			SELECT DISTINCT session_id FROM chat_message
+			WHERE LOWER(TRIM(COALESCE(message_type, ''))) LIKE 'agentscope-state:%'
+			ORDER BY session_id ASC
+			""")
+	List<String> selectSessionIdsWithAgentScopeState();
+
+	@Select("""
+			SELECT COUNT(*) FROM chat_message
+			WHERE session_id = #{sessionId}
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) LIKE 'agentscope-state:%'
+			""")
+	int countAgentScopeStateBySessionId(@Param("sessionId") String sessionId);
 
 	/**
 	 * Query by id
@@ -104,5 +115,25 @@ public interface ChatMessageMapper {
 			WHERE id = #{id}
 			""")
 	int deleteById(@Param("id") Long id);
+
+	@Delete("""
+			DELETE FROM chat_message
+			WHERE session_id = #{sessionId}
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) = LOWER(#{messageType})
+			""")
+	int deleteBySessionIdAndMessageType(@Param("sessionId") String sessionId, @Param("messageType") String messageType);
+
+	@Delete("""
+			DELETE FROM chat_message
+			WHERE session_id = #{sessionId}
+			  AND LOWER(TRIM(COALESCE(message_type, ''))) LIKE 'agentscope-state:%'
+			""")
+	int deleteAgentScopeStateBySessionId(@Param("sessionId") String sessionId);
+
+	@Delete("""
+			DELETE FROM chat_message
+			WHERE LOWER(TRIM(COALESCE(message_type, ''))) LIKE 'agentscope-state:%'
+			""")
+	int deleteAllAgentScopeStateMessages();
 
 }

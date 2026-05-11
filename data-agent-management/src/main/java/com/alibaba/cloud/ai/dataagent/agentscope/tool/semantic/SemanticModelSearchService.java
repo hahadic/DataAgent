@@ -15,8 +15,10 @@
  */
 package com.alibaba.cloud.ai.dataagent.agentscope.tool.semantic;
 
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
 import com.alibaba.cloud.ai.dataagent.entity.AgentDatasource;
 import com.alibaba.cloud.ai.dataagent.entity.SemanticModel;
+import com.alibaba.cloud.ai.dataagent.observability.AnswerTraceExplainStore;
 import com.alibaba.cloud.ai.dataagent.service.datasource.AgentDatasourceService;
 import com.alibaba.cloud.ai.dataagent.service.semantic.SemanticModelService;
 import java.util.ArrayList;
@@ -27,6 +29,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import lombok.RequiredArgsConstructor;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
@@ -41,44 +44,52 @@ public class SemanticModelSearchService {
 
 	private final SemanticModelService semanticModelService;
 
+	private final AnswerTraceExplainStore answerTraceExplainStore;
+
 	public SemanticModelSearchResult search(String agentId, SemanticModelSearchRequest request) {
+		return search(agentId, request, null);
+	}
+
+	public SemanticModelSearchResult search(String agentId, SemanticModelSearchRequest request,
+			@Nullable AgentRequest agentRequest) {
 		if (!StringUtils.hasText(agentId)) {
-			return emptyResult(request == null ? null : request.getQuery(),
-					"semantic_model.search requires a numeric agent id.");
+			return emptyResult(request == null ? null : request.getQuery(), "semantic_model.search 需要数值型 agentId 参数。");
 		}
 		Long parsedAgentId;
 		try {
 			parsedAgentId = Long.valueOf(agentId);
 		}
 		catch (NumberFormatException ex) {
-			return emptyResult(request == null ? null : request.getQuery(),
-					"semantic_model.search requires a numeric agent id.");
+			return emptyResult(request == null ? null : request.getQuery(), "semantic_model.search 需要数值型 agentId 参数。");
 		}
-		return search(parsedAgentId, request);
+		return search(parsedAgentId, request, agentRequest);
 	}
 
 	public SemanticModelSearchResult search(Long agentId, SemanticModelSearchRequest request) {
+		return search(agentId, request, null);
+	}
+
+	public SemanticModelSearchResult search(Long agentId, SemanticModelSearchRequest request,
+			@Nullable AgentRequest agentRequest) {
 		String query = request == null ? null : request.getQuery();
 		if (!StringUtils.hasText(query)) {
-			throw new IllegalArgumentException("query is required for semantic_model.search");
+			throw new IllegalArgumentException("semantic_model.search 需要 query 参数");
 		}
 		AgentDatasource activeDatasource = resolveActiveDatasource(agentId);
 		if (activeDatasource == null || activeDatasource.getDatasourceId() == null) {
-			return emptyResult(query, "No active datasource is available for semantic_model.search.");
+			return emptyResult(query, "当前没有可用于 semantic_model.search 的活动数据源。");
 		}
 		TableSearchScope scope = resolveTableSearchScope(activeDatasource,
 				request == null ? null : request.getTableNames());
 		if (scope.isScoped() && CollectionUtils.isEmpty(scope.getTableNames())) {
-			return emptyResult(query,
-					"Requested tables are outside the active datasource visibility scope for semantic_model.search.");
+			return emptyResult(query, "请求中指定的表超出了当前活动数据源对 semantic_model.search 的可见范围。");
 		}
 		List<SemanticModel> candidates = scope.isUnbounded()
 				? semanticModelService.getEnabledByAgentIdAndDatasourceId(agentId, activeDatasource.getDatasourceId())
 				: semanticModelService.getEnabledByAgentIdAndDatasourceIdAndTableNames(agentId,
 						activeDatasource.getDatasourceId(), scope.getTableNames());
 		if (CollectionUtils.isEmpty(candidates)) {
-			return emptyResult(query,
-					"No enabled semantic model entries matched this agent/table scope. Use datasource explorer for physical schema details.");
+			return emptyResult(query, "当前 Agent/表范围内没有匹配的已启用语义模型条目；物理表结构请改用数据源探索工具查看。");
 		}
 
 		List<ScoredHit> scoredHits = candidates.stream()
@@ -96,22 +107,23 @@ public class SemanticModelSearchService {
 			.toList();
 
 		if (scoredHits.isEmpty()) {
-			return emptyResult(query,
-					"No supplemental semantic hints matched the query. If datasource explorer already answers the schema question, do not call semantic_model.search.");
+			return emptyResult(query, "没有匹配到补充语义提示；如果数据源探索工具已能回答物理表结构问题，就不要额外调用 semantic_model.search。");
 		}
 
 		List<SemanticModelSearchHit> hits = scoredHits.stream().map(this::toHit).toList();
-		return SemanticModelSearchResult.builder()
-			.query(query)
-			.summary(
-					"Found %d supplemental semantic hints. These are auxiliary explanations for table/column understanding, not a replacement for datasource exploration."
-						.formatted(hits.size()))
-			.hits(hits)
-			.build();
+		String summary = "共匹配到 %d 条补充语义提示。这些结果只用于补充理解表和字段语义，不能替代数据源探索工具的物理结构探索。".formatted(hits.size());
+		if (agentRequest != null) {
+			answerTraceExplainStore.recordSemanticSearch(agentRequest, query, "共匹配到 %d 条补充语义提示".formatted(hits.size()),
+					hits);
+		}
+		else {
+			answerTraceExplainStore.recordSemanticSearch(query, "共匹配到 %d 条补充语义提示".formatted(hits.size()), hits);
+		}
+		return SemanticModelSearchResult.builder().summary(summary).hits(hits).resolution("matched").build();
 	}
 
 	private SemanticModelSearchResult emptyResult(String query, String summary) {
-		return SemanticModelSearchResult.builder().query(query).summary(summary).build();
+		return SemanticModelSearchResult.builder().summary(summary).resolution("no_match").build();
 	}
 
 	private AgentDatasource resolveActiveDatasource(Long agentId) {
@@ -135,6 +147,7 @@ public class SemanticModelSearchService {
 			.dataType(model.getDataType())
 			.relationHint(extractRelationHint(model))
 			.matchedBy(String.join(", ", scoredHit.getMatchedBy()))
+			.score(scoredHit.getScore())
 			.build();
 	}
 

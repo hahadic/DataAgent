@@ -14,22 +14,34 @@
  * limitations under the License.
  */
 
-export interface GraphRequest {
+export interface AgentRequest {
   agentId: string;
   threadId?: string;
+  runtimeRequestId?: string;
   query: string;
-  humanFeedback: boolean;
+  clarifyCheckEnabled?: boolean;
+  humanFeedback?: boolean;
   humanFeedbackContent?: string;
   rejectedPlan: boolean;
-  nl2sqlOnly: boolean;
 }
 
-export interface GraphNodeResponse {
+export interface ClarifyMetadata {
+  clarifyRequired?: boolean;
+  riskLevel?: string;
+  originalQuery?: string;
+  missingDimensions?: string[];
+  followUpQuestions?: string[];
+  suggestedAssumptions?: string[];
+  summary?: string;
+}
+
+export interface AgentResponse {
   agentId: string;
   threadId: string;
   nodeName: string;
   textType: TextType;
   text: string;
+  metadata?: ClarifyMetadata & Record<string, any>;
   error: boolean;
   complete: boolean;
 }
@@ -56,8 +68,8 @@ class GraphService {
    * @returns 关闭连接的函数
    */
   async streamSearch(
-    request: GraphRequest,
-    onMessage: (response: GraphNodeResponse) => Promise<void>,
+    request: AgentRequest,
+    onMessage: (response: AgentResponse) => Promise<void>,
     onError?: (error: Error) => Promise<void>,
     onComplete?: () => Promise<void>,
   ): Promise<() => void> {
@@ -67,14 +79,18 @@ class GraphService {
     if (request.threadId) {
       params.append('threadId', request.threadId);
     }
+    if (request.runtimeRequestId) {
+      params.append('runtimeRequestId', request.runtimeRequestId);
+    }
     params.append('query', request.query);
-    params.append('humanFeedback', request.humanFeedback.toString());
-    params.append('rejectedPlan', request.rejectedPlan.toString());
-    params.append('nl2sqlOnly', request.nl2sqlOnly.toString());
-
+    params.append('clarifyCheckEnabled', String(Boolean(request.clarifyCheckEnabled)));
+    if (request.humanFeedback) {
+      params.append('humanFeedback', request.humanFeedback.toString());
+    }
     if (request.humanFeedbackContent) {
       params.append('humanFeedbackContent', request.humanFeedbackContent);
     }
+    params.append('rejectedPlan', request.rejectedPlan.toString());
 
     const url = `${API_BASE_URL}/stream/search?${params.toString()}`;
 
@@ -95,7 +111,7 @@ class GraphService {
         return;
       }
       try {
-        const nodeResponse: GraphNodeResponse = JSON.parse(event.data);
+        const nodeResponse: AgentResponse = JSON.parse(event.data);
         console.log(
           `Node: ${nodeResponse.nodeName}, message: ${nodeResponse.text}, type: ${nodeResponse.textType}`,
         );

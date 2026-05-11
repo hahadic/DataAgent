@@ -15,6 +15,10 @@
  */
 package com.alibaba.cloud.ai.dataagent.agentscope.tool.knowledge;
 
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
+import com.alibaba.cloud.ai.dataagent.agentscope.runtime.ToolContextRequestResolver;
+import com.alibaba.cloud.ai.dataagent.agentscope.tool.ToolError;
+import com.alibaba.cloud.ai.dataagent.agentscope.tool.ToolErrorCode;
 import com.alibaba.cloud.ai.dataagent.service.knowledge.DomainKnowledgeSearchService;
 import com.alibaba.cloud.ai.dataagent.service.knowledge.DomainKnowledgeSearchService.DomainKnowledgeSearchRequest;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -40,9 +44,9 @@ public class DomainBusinessKnowledgeToolSupport {
 			      "type": "string",
 			      "description": "必填。需要检索的业务问题、指标名、术语、SOP 主题或案例主题。"
 			    },
-			    "knowledgeTypes": {
-			      "type": "array",
-			      "description": "可选。限定知识范围。支持 businessTerm、agentKnowledge、document、qa、faq、all。",
+			   "knowledgeTypes": {
+			     "type": "array",
+			     "description": "可选。限定知识范围。支持 businessKnowledge、agentKnowledge、document、qa、faq、all。",
 			      "items": {
 			        "type": "string"
 			      }
@@ -99,10 +103,16 @@ public class DomainBusinessKnowledgeToolSupport {
 
 		@Override
 		public String call(String toolInput) {
+			return call(toolInput, null);
+		}
+
+		@Override
+		public String call(String toolInput, ToolContext toolContext) {
 			try {
 				JsonNode jsonNode = StringUtils.hasText(toolInput) ? objectMapper.readTree(toolInput)
 						: objectMapper.createObjectNode();
 				String query = jsonNode.path("query").asText("");
+				validateQuery(query);
 				List<String> knowledgeTypes = new ArrayList<>();
 				JsonNode knowledgeTypesNode = jsonNode.path("knowledgeTypes");
 				if (knowledgeTypesNode.isArray()) {
@@ -120,16 +130,30 @@ public class DomainBusinessKnowledgeToolSupport {
 
 				DomainKnowledgeSearchRequest request = new DomainKnowledgeSearchRequest(query,
 						knowledgeTypes.isEmpty() ? null : List.copyOf(knowledgeTypes), topK, similarityThreshold);
-				return objectMapper.writeValueAsString(domainKnowledgeSearchService.search(agentId, request));
+				AgentRequest agentRequest = ToolContextRequestResolver.resolveGraphRequest(toolContext);
+				return objectMapper
+					.writeValueAsString(domainKnowledgeSearchService.search(agentId, request, agentRequest));
 			}
 			catch (Exception ex) {
-				throw new IllegalStateException("Failed to search domain business knowledge: " + ex.getMessage(), ex);
+				throw new IllegalStateException(objectToJson(ToolError.of(ToolErrorCode.EXECUTION_FAILED,
+						"domain_business_knowledge.search 执行失败：" + ex.getMessage())), ex);
 			}
 		}
 
-		@Override
-		public String call(String toolInput, ToolContext toolContext) {
-			return call(toolInput);
+		private void validateQuery(String query) {
+			if (!StringUtils.hasText(query)) {
+				throw new IllegalArgumentException(objectToJson(
+						ToolError.of(ToolErrorCode.INVALID_INPUT, "domain_business_knowledge.search 需要 query 参数")));
+			}
+		}
+
+		private String objectToJson(Object value) {
+			try {
+				return objectMapper.writeValueAsString(value);
+			}
+			catch (Exception ex) {
+				return "{\"code\":\"EXECUTION_FAILED\",\"message\":\"工具错误序列化失败\"}";
+			}
 		}
 
 	}

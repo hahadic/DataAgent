@@ -15,26 +15,27 @@
  */
 package com.alibaba.cloud.ai.dataagent.service.knowledge;
 
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
+
 import java.util.List;
+import org.springframework.lang.Nullable;
 
 public interface DomainKnowledgeSearchService {
 
 	DomainKnowledgeSearchResult search(String agentId, DomainKnowledgeSearchRequest request);
 
+	DomainKnowledgeSearchResult search(String agentId, DomainKnowledgeSearchRequest request,
+			@Nullable AgentRequest agentRequest);
+
 	record DomainKnowledgeSearchRequest(String query, List<String> knowledgeTypes, Integer topK,
 			Double similarityThreshold) {
 	}
 
-	record DomainKnowledgeSearchResult(String query, List<String> appliedKnowledgeTypes, List<KnowledgeHit> hits,
-			List<String> warnings, SearchDiagnostics diagnostics) {
+	record DomainKnowledgeSearchResult(List<KnowledgeHit> hits, List<String> warnings, String resolution) {
 	}
 
 	record KnowledgeHit(String vectorType, String knowledgeId, String title, String summary, String snippet,
 			String source, String concreteType) {
-	}
-
-	record SearchDiagnostics(String runtimeAgentId, Integer recalledBusinessTermCount,
-			Integer recalledAgentKnowledgeCount, boolean businessTermVectorReady, boolean agentKnowledgeVectorReady) {
 	}
 
 }

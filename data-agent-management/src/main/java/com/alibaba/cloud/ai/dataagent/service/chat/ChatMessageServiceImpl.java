@@ -21,7 +21,6 @@ import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.Collections;
 import java.util.List;
 
 /**
@@ -34,6 +33,8 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 
 	private final ChatMessageMapper chatMessageMapper;
 
+	private final ChatSessionService chatSessionService;
+
 	@Override
 	public List<ChatMessage> findBySessionId(String sessionId) {
 		return chatMessageMapper.selectBySessionId(sessionId);
@@ -45,11 +46,20 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 	}
 
 	@Override
-	public List<ChatMessage> findRecentBySessionId(String sessionId, int limit) {
-		if (limit <= 0) {
-			return Collections.emptyList();
-		}
-		return chatMessageMapper.selectRecentMemoryEligibleBySessionId(sessionId, limit);
+	public List<ChatMessage> findVisibleBySessionId(String sessionId, Long agentId) {
+		chatSessionService.requireSessionForAgent(sessionId, agentId);
+		return findVisibleBySessionId(sessionId);
+	}
+
+	@Override
+	public List<ChatMessage> findBySessionIdAndMessageType(String sessionId, String messageType) {
+		return chatMessageMapper.selectBySessionIdAndMessageType(sessionId, messageType);
+	}
+
+	@Override
+	public List<ChatMessage> findBySessionIdAndMessageType(String sessionId, String messageType, Long agentId) {
+		chatSessionService.requireSessionForAgent(sessionId, agentId);
+		return findBySessionIdAndMessageType(sessionId, messageType);
 	}
 
 	@Override
@@ -57,6 +67,14 @@ public class ChatMessageServiceImpl implements ChatMessageService {
 		chatMessageMapper.insert(message);
 		log.info("Saved message: {} for session: {}", message.getId(), message.getSessionId());
 		return message;
+	}
+
+	@Override
+	public ChatMessage saveMessage(ChatMessage message, Long agentId) {
+		if (message != null) {
+			chatSessionService.requireSessionForAgent(message.getSessionId(), agentId);
+		}
+		return saveMessage(message);
 	}
 
 }
