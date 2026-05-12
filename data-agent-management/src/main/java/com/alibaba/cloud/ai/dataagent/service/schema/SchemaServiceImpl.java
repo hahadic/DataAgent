@@ -15,6 +15,7 @@
  */
 package com.alibaba.cloud.ai.dataagent.service.schema;
 
+import com.alibaba.cloud.ai.dataagent.bo.schema.ColumnInfoBO;
 import com.alibaba.cloud.ai.dataagent.connector.DbQueryParameter;
 import com.alibaba.cloud.ai.dataagent.bo.schema.ForeignKeyInfoBO;
 import com.alibaba.cloud.ai.dataagent.bo.schema.TableInfoBO;
@@ -64,6 +65,8 @@ import static com.alibaba.cloud.ai.dataagent.util.DocumentConverterUtil.convertT
 @AllArgsConstructor
 public class SchemaServiceImpl implements SchemaService {
 
+	private static final String FOREIGN_KEY_SEPARATOR = "、";
+
 	private final ExecutorService dbOperationExecutor;
 
 	private final AccessorFactory accessorFactory;
@@ -106,8 +109,8 @@ public class SchemaServiceImpl implements SchemaService {
 		List<String> missingTables = getMissingTableNamesWithForeignKeySet(mutableTableDocuments,
 				relatedNamesFromForeignKeys);
 		if (!missingTables.isEmpty() && datasourceId != null) {
-			loadMissingTableDocuments(datasourceId, mutableTableDocuments, missingTables);
-			loadMissingColDocForMissingTables(datasourceId, mutableColumnDocuments, missingTables);
+			loadMissingTableDocuments(agentId, datasourceId, mutableTableDocuments, missingTables);
+			loadMissingColDocForMissingTables(agentId, datasourceId, mutableColumnDocuments, missingTables);
 		}
 
 		// Build table list
@@ -130,6 +133,8 @@ public class SchemaServiceImpl implements SchemaService {
 	public Boolean schema(Integer datasourceId, SchemaInitRequest schemaInitRequest) throws Exception {
 		log.info("Starting schema initialization for datasource: {}", datasourceId);
 		DbConfigBO config = schemaInitRequest.getDbConfig();
+		Long agentId = schemaInitRequest.getAgentId();
+		Assert.notNull(agentId, "agentId cannot be null");
 		DbQueryParameter dqp = DbQueryParameter.from(config)
 			.setSchema(config.getSchema())
 			.setTables(schemaInitRequest.getTables());
@@ -140,7 +145,7 @@ public class SchemaServiceImpl implements SchemaService {
 
 			// 清理旧数据
 			log.info("Clearing existing schema data for datasource: {}", datasourceId);
-			clearSchemaDataForDatasource(datasourceId);
+			clearSchemaDataForDatasource(agentId, datasourceId);
 			log.debug("Successfully cleared existing schema data for datasource: {}", datasourceId);
 
 			// 处理外键
@@ -168,15 +173,16 @@ public class SchemaServiceImpl implements SchemaService {
 			}
 
 			log.info("Successfully processed all tables for datasource: {}", datasourceId);
+			applyVisibleColumnRestrictions(tables, schemaInitRequest.getVisibleColumnsByTable());
 
 			// 转换为文档
-			List<Document> columnDocs = convertColumnsToDocuments(datasourceId, tables);
-			List<Document> tableDocs = convertTablesToDocuments(datasourceId, tables);
+			List<Document> columnDocs = convertColumnsToDocuments(agentId, datasourceId, tables);
+			List<Document> tableDocs = convertTablesToDocuments(agentId, datasourceId, tables);
 
 			// 存储文档
 			log.info("Storing  columns and {} tables for datasource: {}", columnDocs.size(), tableDocs.size(),
 					datasourceId);
-			storeSchemaDocuments(datasourceId, columnDocs, tableDocs);
+			storeSchemaDocuments(agentId, datasourceId, columnDocs, tableDocs);
 			log.info("Successfully stored all documents for datasource: {}", datasourceId);
 			return true;
 		}
@@ -246,15 +252,16 @@ public class SchemaServiceImpl implements SchemaService {
 		return partitions;
 	}
 
-	protected void storeSchemaDocuments(Integer datasourceId, List<Document> columns, List<Document> tables) {
+	protected void storeSchemaDocuments(Long agentId, Integer datasourceId, List<Document> columns,
+			List<Document> tables) {
 		// 串行去批写入，并行流的时候有API限速了
 		List<List<Document>> columnBatches = batchingStrategy.batch(columns);
 		for (List<Document> batch : columnBatches) {
-			agentVectorStoreService.addDocuments(datasourceId.toString(), batch);
+			agentVectorStoreService.addDocuments(agentId.toString(), batch);
 		}
 		List<List<Document>> tableBatches = batchingStrategy.batch(tables);
 		for (List<Document> batch : tableBatches) {
-			agentVectorStoreService.addDocuments(datasourceId.toString(), batch);
+			agentVectorStoreService.addDocuments(agentId.toString(), batch);
 		}
 
 	}
@@ -271,9 +278,10 @@ public class SchemaServiceImpl implements SchemaService {
 		return map;
 	}
 
-	protected void clearSchemaDataForDatasource(Integer datasourceId) throws Exception {
+	protected void clearSchemaDataForDatasource(Long agentId, Integer datasourceId) throws Exception {
 		// 检查是否有文档需要删除
 		Map<String, Object> metadata = new HashMap<>();
+		metadata.put(Constant.AGENT_ID, agentId.toString());
 		metadata.put(Constant.DATASOURCE_ID, datasourceId.toString());
 		metadata.put(DocumentMetadataConstant.VECTOR_TYPE, DocumentMetadataConstant.COLUMN);
 
@@ -283,8 +291,128 @@ public class SchemaServiceImpl implements SchemaService {
 		agentVectorStoreService.deleteDocumentsByMetadata(metadata);
 	}
 
+	private void applyVisibleColumnRestrictions(List<TableInfoBO> tables,
+			Map<String, List<String>> visibleColumnsByTable) {
+		Map<String, Set<String>> normalizedRestrictions = normalizeVisibleColumnRestrictions(visibleColumnsByTable);
+		if (normalizedRestrictions.isEmpty()) {
+			return;
+		}
+		for (TableInfoBO table : Optional.ofNullable(tables).orElse(List.of())) {
+			Set<String> visibleColumns = resolveVisibleColumns(normalizedRestrictions, table.getName());
+			if (visibleColumns == null) {
+				continue;
+			}
+			List<ColumnInfoBO> filteredColumns = Optional.ofNullable(table.getColumns())
+				.orElse(List.of())
+				.stream()
+				.filter(column -> visibleColumns.contains(normalizeIdentifier(column.getName())))
+				.toList();
+			table.setColumns(filteredColumns);
+			List<String> filteredPrimaryKeys = Optional.ofNullable(table.getPrimaryKeys())
+				.orElse(List.of())
+				.stream()
+				.filter(primaryKey -> visibleColumns.contains(normalizeIdentifier(primaryKey)))
+				.toList();
+			table.setPrimaryKeys(filteredPrimaryKeys);
+			table.setForeignKey(filterForeignKeyText(table.getForeignKey(), normalizedRestrictions));
+		}
+	}
+
+	private Map<String, Set<String>> normalizeVisibleColumnRestrictions(
+			Map<String, List<String>> visibleColumnsByTable) {
+		Map<String, Set<String>> normalizedRestrictions = new LinkedHashMap<>();
+		Optional.ofNullable(visibleColumnsByTable).orElse(Map.of()).forEach((tableName, columns) -> {
+			String normalizedTableName = normalizeIdentifier(tableName);
+			if (StringUtils.isBlank(normalizedTableName)) {
+				return;
+			}
+			Set<String> normalizedColumns = Optional.ofNullable(columns)
+				.orElse(List.of())
+				.stream()
+				.map(this::normalizeIdentifier)
+				.filter(StringUtils::isNotBlank)
+				.collect(Collectors.toCollection(LinkedHashSet::new));
+			if (!normalizedColumns.isEmpty()) {
+				normalizedRestrictions.put(normalizedTableName, Set.copyOf(normalizedColumns));
+			}
+		});
+		return normalizedRestrictions;
+	}
+
+	private String filterForeignKeyText(String foreignKeyText, Map<String, Set<String>> visibleColumnsByTable) {
+		if (StringUtils.isBlank(foreignKeyText)) {
+			return foreignKeyText;
+		}
+		return Arrays.stream(foreignKeyText.split(Pattern.quote(FOREIGN_KEY_SEPARATOR)))
+			.map(StringUtils::trimToEmpty)
+			.filter(StringUtils::isNotBlank)
+			.filter(relation -> isForeignKeyRelationVisible(relation, visibleColumnsByTable))
+			.collect(Collectors.joining(FOREIGN_KEY_SEPARATOR));
+	}
+
+	private boolean isForeignKeyRelationVisible(String relation, Map<String, Set<String>> visibleColumnsByTable) {
+		String[] parts = StringUtils.splitByWholeSeparatorPreserveAllTokens(relation, "=");
+		if (parts == null || parts.length != 2) {
+			return false;
+		}
+		return isColumnReferenceVisible(parts[0], visibleColumnsByTable)
+				&& isColumnReferenceVisible(parts[1], visibleColumnsByTable);
+	}
+
+	private boolean isColumnReferenceVisible(String reference, Map<String, Set<String>> visibleColumnsByTable) {
+		String normalizedReference = normalizeIdentifier(reference);
+		int lastDot = normalizedReference.lastIndexOf('.');
+		if (lastDot <= 0 || lastDot >= normalizedReference.length() - 1) {
+			return false;
+		}
+		String tableName = normalizedReference.substring(0, lastDot);
+		String columnName = normalizedReference.substring(lastDot + 1);
+		Set<String> visibleColumns = resolveVisibleColumns(visibleColumnsByTable, tableName);
+		if (visibleColumns == null) {
+			return true;
+		}
+		return visibleColumns.contains(columnName);
+	}
+
+	private Set<String> resolveVisibleColumns(Map<String, Set<String>> visibleColumnsByTable, String tableName) {
+		String normalizedTableName = normalizeIdentifier(tableName);
+		Set<String> exactMatch = visibleColumnsByTable.get(normalizedTableName);
+		if (exactMatch != null) {
+			return exactMatch;
+		}
+		String normalizedLeafTableName = normalizeLeafIdentifier(normalizedTableName);
+		List<Set<String>> leafMatches = visibleColumnsByTable.entrySet()
+			.stream()
+			.filter(entry -> normalizeLeafIdentifier(entry.getKey()).equals(normalizedLeafTableName))
+			.map(Map.Entry::getValue)
+			.distinct()
+			.toList();
+		if (leafMatches.size() == 1) {
+			return leafMatches.get(0);
+		}
+		return null;
+	}
+
+	private String normalizeIdentifier(String value) {
+		String normalized = StringUtils.trimToEmpty(value);
+		normalized = StringUtils.removeStart(normalized, "`");
+		normalized = StringUtils.removeEnd(normalized, "`");
+		normalized = StringUtils.removeStart(normalized, "\"");
+		normalized = StringUtils.removeEnd(normalized, "\"");
+		normalized = StringUtils.removeStart(normalized, "[");
+		normalized = StringUtils.removeEnd(normalized, "]");
+		return normalized.toLowerCase(Locale.ROOT);
+	}
+
+	private String normalizeLeafIdentifier(String value) {
+		String normalized = normalizeIdentifier(value);
+		int lastDot = normalized.lastIndexOf('.');
+		return lastDot >= 0 ? normalized.substring(lastDot + 1) : normalized;
+	}
+
 	@Override
-	public List<Document> getTableDocumentsByDatasource(Integer datasourceId, String query) {
+	public List<Document> getTableDocumentsByDatasource(String agentId, Integer datasourceId, String query) {
+		Assert.hasText(agentId, "agentId cannot be blank");
 		Assert.notNull(datasourceId, "datasourceId cannot be null");
 		int tableTopK = dataAgentProperties.getVectorStore().getTableTopkLimit();
 		double tableThreshold = dataAgentProperties.getVectorStore().getTableSimilarityThreshold();
@@ -293,6 +421,7 @@ public class SchemaServiceImpl implements SchemaService {
 		FilterExpressionBuilder b = new FilterExpressionBuilder();
 		List<Filter.Expression> conditions = new ArrayList<>();
 
+		conditions.add(b.eq(Constant.AGENT_ID, agentId).build());
 		conditions.add(b.eq(Constant.DATASOURCE_ID, datasourceId.toString()).build());
 		conditions.add(b.eq(DocumentMetadataConstant.VECTOR_TYPE, DocumentMetadataConstant.TABLE).build());
 
@@ -328,10 +457,10 @@ public class SchemaServiceImpl implements SchemaService {
 		return new ArrayList<>(missingTables);
 	}
 
-	private void loadMissingTableDocuments(Integer datasourceId, List<Document> tableDocuments,
+	private void loadMissingTableDocuments(String agentId, Integer datasourceId, List<Document> tableDocuments,
 			List<String> missingTableNames) {
 		// 加载缺失的表文档
-		List<Document> foundTableDocs = this.getTableDocuments(datasourceId, missingTableNames);
+		List<Document> foundTableDocs = this.getTableDocuments(agentId, datasourceId, missingTableNames);
 		if (foundTableDocs.size() > missingTableNames.size())
 			log.error("When we search missing tables:{},  more than expected tables for datasource: {}",
 					missingTableNames, datasourceId);
@@ -342,10 +471,10 @@ public class SchemaServiceImpl implements SchemaService {
 		}
 	}
 
-	private void loadMissingColDocForMissingTables(Integer datasourceId, List<Document> curColDocs,
+	private void loadMissingColDocForMissingTables(String agentId, Integer datasourceId, List<Document> curColDocs,
 			List<String> missingTableNames) {
 		// 加载缺失的列文档
-		List<Document> foundColumnDocs = this.getColumnDocumentsByTableName(datasourceId, missingTableNames);
+		List<Document> foundColumnDocs = this.getColumnDocumentsByTableName(agentId, datasourceId, missingTableNames);
 		if (!foundColumnDocs.isEmpty()) {
 			// 使用公共方法添加去重后的文档
 			addUniqueDocuments(curColDocs, foundColumnDocs, DocumentMetadataConstant.COLUMN, missingTableNames);
@@ -488,13 +617,14 @@ public class SchemaServiceImpl implements SchemaService {
 	}
 
 	@Override
-	public List<Document> getTableDocuments(Integer datasourceId, List<String> tableNames) {
+	public List<Document> getTableDocuments(String agentId, Integer datasourceId, List<String> tableNames) {
+		Assert.hasText(agentId, "AgentId cannot be blank.");
 		Assert.notNull(datasourceId, "DatasourceId cannot be null.");
 		if (tableNames.isEmpty())
 			return Collections.emptyList();
 		// 通过元数据过滤查找目标表
-		Filter.Expression filterExpression = DynamicFilterService.buildFilterExpressionForSearchTables(datasourceId,
-				tableNames);
+		Filter.Expression filterExpression = DynamicFilterService.buildFilterExpressionForSearchTables(agentId,
+				datasourceId, tableNames);
 		if (filterExpression == null) {
 			log.error("FilterExpression is null.This should not happen when tableNames is not Empty, ");
 			return Collections.emptyList();
@@ -503,14 +633,15 @@ public class SchemaServiceImpl implements SchemaService {
 	}
 
 	@Override
-	public List<Document> getColumnDocumentsByTableName(Integer datasourceId, List<String> tableNames) {
+	public List<Document> getColumnDocumentsByTableName(String agentId, Integer datasourceId, List<String> tableNames) {
+		Assert.hasText(agentId, "AgentId cannot be blank.");
 		Assert.notNull(datasourceId, "DatasourceId cannot be null.");
 		if (tableNames.isEmpty()) {
 			log.warn("TableNames is empty.We need talbeNames to search their columns");
 			return Collections.emptyList();
 		}
-		Filter.Expression filterExpression = dynamicFilterService.buildFilterExpressionForSearchColumns(datasourceId,
-				tableNames);
+		Filter.Expression filterExpression = dynamicFilterService.buildFilterExpressionForSearchColumns(agentId,
+				datasourceId, tableNames);
 		if (filterExpression == null) {
 			log.error("FilterExpression is null.This should not happen when tableNames is not Empty, ");
 			return Collections.emptyList();

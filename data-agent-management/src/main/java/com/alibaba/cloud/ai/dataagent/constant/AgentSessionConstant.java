@@ -13,21 +13,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.alibaba.cloud.ai.dataagent.bo.schema;
+package com.alibaba.cloud.ai.dataagent.constant;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import java.time.Duration;
 
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class ResultBO {
+/**
+ * Agent 会话相关的共享默认配置常量。
+ */
+public final class AgentSessionConstant {
 
-	private ResultSetBO resultSet;
+	public static final String DEFAULT_SESSION_TITLE = "新会话";
 
-	private DisplayStyleBO displayStyle;
+	public static final int SESSION_TITLE_MAX_LENGTH = 20;
+
+	public static final Duration SESSION_TITLE_GENERATION_TIMEOUT = Duration.ofSeconds(15);
+
+	public static final Duration SESSION_EVENT_HEARTBEAT_INTERVAL = Duration.ofSeconds(2);
+
+	private AgentSessionConstant() {
+
+	}
 
 }

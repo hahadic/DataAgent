@@ -31,14 +31,20 @@ public interface ChatMessageService {
 	 */
 	List<ChatMessage> findVisibleBySessionId(String sessionId);
 
+	List<ChatMessage> findVisibleBySessionId(String sessionId, Long agentId);
+
 	/**
-	 * Get recent messages by session ID for memory loading.
+	 * Get messages by session ID and message type.
 	 */
-	List<ChatMessage> findRecentBySessionId(String sessionId, int limit);
+	List<ChatMessage> findBySessionIdAndMessageType(String sessionId, String messageType);
+
+	List<ChatMessage> findBySessionIdAndMessageType(String sessionId, String messageType, Long agentId);
 
 	/**
 	 * Save message
 	 */
 	ChatMessage saveMessage(ChatMessage message);
+
+	ChatMessage saveMessage(ChatMessage message, Long agentId);
 
 }

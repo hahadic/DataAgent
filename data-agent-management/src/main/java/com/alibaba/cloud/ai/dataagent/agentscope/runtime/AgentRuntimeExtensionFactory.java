@@ -15,7 +15,7 @@
  */
 package com.alibaba.cloud.ai.dataagent.agentscope.runtime;
 
-import com.alibaba.cloud.ai.dataagent.agentscope.dto.GraphRequest;
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
 import com.alibaba.cloud.ai.dataagent.agentscope.template.AgentRuntimeExtensions;
 import io.agentscope.core.hook.Hook;
 import io.agentscope.core.memory.Memory;
@@ -42,13 +42,14 @@ public class AgentRuntimeExtensionFactory {
 
 	private final AgentScopeSkillBoxFactory skillBoxFactory;
 
-	public AgentRuntimeExtensions create(GraphRequest request, @Nullable AgentRuntimeEventPublisher eventPublisher,
-			Map<String, ToolCallback> toolCallbacks) {
+	public AgentRuntimeExtensions create(AgentRequest request, @Nullable AgentRuntimeEventPublisher eventPublisher,
+			Map<String, ToolCallback> toolCallbacks, PreparedMemory preparedMemory) {
 		Toolkit toolkit = toolkitFactory.buildToolkit(toolCallbacks);
 		SkillBox skillBox = skillBoxFactory.create(request.getAgentId(), toolkit);
-		Memory memory = memoryFactory.create(request.getThreadId());
+		Memory memory = preparedMemory == null ? memoryFactory.create(request).memory() : preparedMemory.memory();
 		AgentRuntimeRequestMetadata requestMetadata = new AgentRuntimeRequestMetadata(request.getAgentId(),
-				request.getThreadId(), request.isNl2sqlOnly());
+				request.getThreadId(), request.getRuntimeRequestId(), request.isHumanFeedback(),
+				request.getHumanFeedbackContent());
 		ToolExecutionContext toolExecutionContext = ToolExecutionContext.builder()
 			.register(requestMetadata)
 			.register("graphRequest", request)
@@ -56,6 +57,7 @@ public class AgentRuntimeExtensionFactory {
 		List<Hook> hooks = hookFactory.create(request, eventPublisher);
 		Map<String, Object> attributes = new HashMap<>();
 		attributes.put("threadId", request.getThreadId());
+		attributes.put("memoryLoadedFromNative", preparedMemory != null && preparedMemory.loadedFromNative());
 		return new AgentRuntimeExtensions(toolkit, memory, toolExecutionContext, hooks, attributes, skillBox, "");
 	}
 

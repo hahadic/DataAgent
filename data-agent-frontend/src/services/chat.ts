@@ -39,7 +39,93 @@ export interface ChatMessage {
   titleNeeded?: boolean;
 }
 
+export interface AnswerTraceSemanticHit {
+  tableName?: string;
+  columnName?: string;
+  businessName?: string;
+  businessDescription?: string;
+  matchedBy?: string;
+  score?: number;
+  relationHint?: string;
+}
+
+export interface AnswerTraceKnowledgeHit {
+  vectorType?: string;
+  knowledgeId?: string;
+  title?: string;
+  summary?: string;
+  snippet?: string;
+  source?: string;
+  concreteType?: string;
+}
+
+export interface AnswerTraceToolStep {
+  toolName?: string;
+  title?: string;
+  summary?: string;
+  detail?: string;
+  datasource?: string;
+  timestampEpochMs?: number;
+}
+
+export interface AnswerTraceExplain {
+  sessionId: string;
+  runtimeRequestId: string;
+  agentId?: string;
+  question?: string;
+  answer?: string;
+  datasource?: string;
+  sql?: string;
+  decisionReason?: string;
+  resultScope?: string;
+  usedTables: string[];
+  usedColumns: string[];
+  relationEvidence: Record<string, any>[];
+  toolDecisionReasons: string[];
+  resultScopeDetails: string[];
+  semanticHits: AnswerTraceSemanticHit[];
+  knowledgeHits: AnswerTraceKnowledgeHit[];
+  toolSteps: AnswerTraceToolStep[];
+  clarify?: Record<string, any>;
+  warnings: string[];
+  updatedAt: number;
+}
+
+export interface TraceSpan {
+  name: string;
+  spanId: string;
+  parentSpanId: string;
+  kind: string;
+  status: string;
+  startEpochMs: number;
+  endEpochMs: number;
+  durationMs: number;
+  attributes: Record<string, string>;
+  children: TraceSpan[];
+}
+
+export interface SessionTrace {
+  sessionId: string;
+  traceId: string;
+  runtimeRequestId: string;
+  agentId: string;
+  startEpochMs: number;
+  endEpochMs: number;
+  durationMs: number;
+  spanCount: number;
+  rootSpan: TraceSpan | null;
+  rootSpans: TraceSpan[];
+}
+
 const API_BASE_URL = '/api';
+
+const resolveAgentId = (agentId: number | string): number => {
+  const resolvedAgentId = typeof agentId === 'number' ? agentId : Number(agentId);
+  if (!Number.isFinite(resolvedAgentId)) {
+    throw new Error('智能体ID无效，请刷新后重试');
+  }
+  return resolvedAgentId;
+};
 
 class ChatService {
   /**
@@ -47,7 +133,10 @@ class ChatService {
    * @param agentId Agent ID
    */
   async getAgentSessions(agentId: number): Promise<ChatSession[]> {
-    const response = await axios.get<ChatSession[]>(`${API_BASE_URL}/agent/${agentId}/sessions`);
+    const resolvedAgentId = resolveAgentId(agentId);
+    const response = await axios.get<ChatSession[]>(
+      `${API_BASE_URL}/agent/${resolvedAgentId}/sessions`,
+    );
     return response.data;
   }
 
@@ -58,13 +147,14 @@ class ChatService {
    * @param userId 用户ID
    */
   async createSession(agentId: number, title?: string, userId?: number): Promise<ChatSession> {
+    const resolvedAgentId = resolveAgentId(agentId);
     const request = {
       title,
       userId,
     };
 
     const response = await axios.post<ChatSession>(
-      `${API_BASE_URL}/agent/${agentId}/sessions`,
+      `${API_BASE_URL}/agent/${resolvedAgentId}/sessions`,
       request,
     );
     return response.data;
@@ -75,7 +165,10 @@ class ChatService {
    * @param agentId Agent ID
    */
   async clearAgentSessions(agentId: number): Promise<ApiResponse> {
-    const response = await axios.delete<ApiResponse>(`${API_BASE_URL}/agent/${agentId}/sessions`);
+    const resolvedAgentId = resolveAgentId(agentId);
+    const response = await axios.delete<ApiResponse>(
+      `${API_BASE_URL}/agent/${resolvedAgentId}/sessions`,
+    );
     return response.data;
   }
 
@@ -83,9 +176,41 @@ class ChatService {
    * 获取会话的消息列表
    * @param sessionId 会话ID
    */
-  async getSessionMessages(sessionId: string): Promise<ChatMessage[]> {
+  async getSessionMessages(sessionId: string, agentId: number): Promise<ChatMessage[]> {
+    const resolvedAgentId = resolveAgentId(agentId);
     const response = await axios.get<ChatMessage[]>(
       `${API_BASE_URL}/sessions/${sessionId}/messages`,
+      { params: { agentId: resolvedAgentId } },
+    );
+    return response.data;
+  }
+
+  async getSessionTrace(sessionId: string, agentId: number): Promise<SessionTrace> {
+    const resolvedAgentId = resolveAgentId(agentId);
+    const response = await axios.get<SessionTrace>(`${API_BASE_URL}/sessions/${sessionId}/trace`, {
+      params: { agentId: resolvedAgentId },
+    });
+    return response.data;
+  }
+
+  async getLatestAnswerExplain(sessionId: string, agentId: number): Promise<AnswerTraceExplain> {
+    const resolvedAgentId = resolveAgentId(agentId);
+    const response = await axios.get<AnswerTraceExplain>(
+      `${API_BASE_URL}/sessions/${sessionId}/answers/latest/explain`,
+      { params: { agentId: resolvedAgentId } },
+    );
+    return response.data;
+  }
+
+  async getAnswerExplain(
+    sessionId: string,
+    runtimeRequestId: string,
+    agentId: number,
+  ): Promise<AnswerTraceExplain> {
+    const resolvedAgentId = resolveAgentId(agentId);
+    const response = await axios.get<AnswerTraceExplain>(
+      `${API_BASE_URL}/sessions/${sessionId}/answers/${runtimeRequestId}/explain`,
+      { params: { agentId: resolvedAgentId } },
     );
     return response.data;
   }
@@ -95,8 +220,13 @@ class ChatService {
    * @param sessionId 会话ID
    * @param message 消息对象
    */
-  async saveMessage(sessionId: string, message: ChatMessage): Promise<ChatMessage> {
+  async saveMessage(
+    sessionId: string,
+    agentId: number,
+    message: ChatMessage,
+  ): Promise<ChatMessage> {
     try {
+      const resolvedAgentId = resolveAgentId(agentId);
       // 设置会话ID
       const messageData = {
         ...message,
@@ -106,6 +236,7 @@ class ChatService {
       const response = await axios.post<ChatMessage>(
         `${API_BASE_URL}/sessions/${sessionId}/messages`,
         messageData,
+        { params: { agentId: resolvedAgentId } },
       );
       return response.data;
     } catch (error) {
@@ -121,13 +252,14 @@ class ChatService {
    * @param sessionId 会话ID
    * @param isPinned 是否置顶
    */
-  async pinSession(sessionId: string, isPinned: boolean): Promise<ApiResponse> {
+  async pinSession(sessionId: string, agentId: number, isPinned: boolean): Promise<ApiResponse> {
     try {
+      const resolvedAgentId = resolveAgentId(agentId);
       const response = await axios.put<ApiResponse>(
         `${API_BASE_URL}/sessions/${sessionId}/pin`,
         null,
         {
-          params: { isPinned },
+          params: { agentId: resolvedAgentId, isPinned },
         },
       );
       return response.data;
@@ -147,8 +279,9 @@ class ChatService {
    * @param sessionId 会话ID
    * @param title 新标题
    */
-  async renameSession(sessionId: string, title: string): Promise<ApiResponse> {
+  async renameSession(sessionId: string, agentId: number, title: string): Promise<ApiResponse> {
     try {
+      const resolvedAgentId = resolveAgentId(agentId);
       if (!title || title.trim().length === 0) {
         throw new Error('标题不能为空');
       }
@@ -157,7 +290,7 @@ class ChatService {
         `${API_BASE_URL}/sessions/${sessionId}/rename`,
         null,
         {
-          params: { title: title.trim() },
+          params: { agentId: resolvedAgentId, title: title.trim() },
         },
       );
       return response.data;
@@ -176,9 +309,12 @@ class ChatService {
    * 删除单个会话
    * @param sessionId 会话ID
    */
-  async deleteSession(sessionId: string): Promise<ApiResponse> {
+  async deleteSession(sessionId: string, agentId: number): Promise<ApiResponse> {
     try {
-      const response = await axios.delete<ApiResponse>(`${API_BASE_URL}/sessions/${sessionId}`);
+      const resolvedAgentId = resolveAgentId(agentId);
+      const response = await axios.delete<ApiResponse>(`${API_BASE_URL}/sessions/${sessionId}`, {
+        params: { agentId: resolvedAgentId },
+      });
       return response.data;
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 500) {
@@ -193,12 +329,14 @@ class ChatService {
    * @param sessionId 会话ID
    * @param content 报告内容
    */
-  async downloadHtmlReport(sessionId: string, content: string): Promise<void> {
+  async downloadHtmlReport(sessionId: string, agentId: number, content: string): Promise<void> {
     try {
+      const resolvedAgentId = resolveAgentId(agentId);
       const response = await axios.post(
         `${API_BASE_URL}/sessions/${sessionId}/reports/html`,
         content,
         {
+          params: { agentId: resolvedAgentId },
           responseType: 'blob', // 重要：设置响应类型为blob
           headers: {
             'Content-Type': 'text/plain;charset=utf-8', // 明确设置内容类型和编码

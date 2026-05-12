@@ -19,11 +19,15 @@ import com.alibaba.cloud.ai.dataagent.dto.ChatMessageDTO;
 import com.alibaba.cloud.ai.dataagent.entity.ChatMessage;
 import com.alibaba.cloud.ai.dataagent.entity.ChatSession;
 import com.alibaba.cloud.ai.dataagent.exception.InvalidInputException;
+import com.alibaba.cloud.ai.dataagent.observability.AnswerTraceExplainStore;
+import com.alibaba.cloud.ai.dataagent.observability.SessionTraceStore;
 import com.alibaba.cloud.ai.dataagent.service.chat.ChatMessageService;
 import com.alibaba.cloud.ai.dataagent.service.chat.ChatSessionService;
 import com.alibaba.cloud.ai.dataagent.service.chat.SessionTitleService;
 import com.alibaba.cloud.ai.dataagent.util.ReportTemplateUtil;
 import com.alibaba.cloud.ai.dataagent.vo.ApiResponse;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -34,6 +38,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
@@ -48,6 +53,8 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class ChatController {
 
+	private static final String ANSWER_EXPLAIN_MESSAGE_TYPE = "answer-explain";
+
 	private final ChatSessionService chatSessionService;
 
 	private final ChatMessageService chatMessageService;
@@ -55,6 +62,12 @@ public class ChatController {
 	private final SessionTitleService sessionTitleService;
 
 	private final ReportTemplateUtil reportTemplateUtil;
+
+	private final SessionTraceStore sessionTraceStore;
+
+	private final AnswerTraceExplainStore answerTraceExplainStore;
+
+	private final ObjectMapper objectMapper;
 
 	/**
 	 * Get session list for an agent
@@ -113,9 +126,90 @@ public class ChatController {
 	 * Get message list for a session
 	 */
 	@GetMapping("/sessions/{sessionId}/messages")
-	public ResponseEntity<List<ChatMessage>> getSessionMessages(@PathVariable(value = "sessionId") String sessionId) {
-		List<ChatMessage> messages = chatMessageService.findVisibleBySessionId(sessionId);
+	public ResponseEntity<List<ChatMessage>> getSessionMessages(@PathVariable(value = "sessionId") String sessionId,
+			@RequestParam(value = "agentId") Long agentId) {
+		List<ChatMessage> messages = chatMessageService.findVisibleBySessionId(sessionId, agentId);
 		return ResponseEntity.ok(messages);
+	}
+
+	@GetMapping("/sessions/{sessionId}/trace")
+	public ResponseEntity<?> getLatestSessionTrace(@PathVariable(value = "sessionId") String sessionId,
+			@RequestParam(value = "agentId") Long agentId) {
+		chatSessionService.requireSessionForAgent(sessionId, agentId);
+		return sessionTraceStore.getLatestTrace(sessionId)
+			.<ResponseEntity<?>>map(ResponseEntity::ok)
+			.orElseGet(() -> ResponseEntity.notFound().build());
+	}
+
+	@GetMapping("/sessions/{sessionId}/answers/latest/explain")
+	public ResponseEntity<?> getLatestAnswerExplain(@PathVariable(value = "sessionId") String sessionId,
+			@RequestParam(value = "agentId") Long agentId) {
+		chatSessionService.requireSessionForAgent(sessionId, agentId);
+		return answerTraceExplainStore.getLatestExplain(sessionId)
+			.<ResponseEntity<?>>map(ResponseEntity::ok)
+			.or(() -> loadLatestPersistedAnswerExplain(sessionId, agentId).map(ResponseEntity::ok))
+			.orElseGet(() -> ResponseEntity.notFound().build());
+	}
+
+	@GetMapping("/sessions/{sessionId}/answers/{runtimeRequestId}/explain")
+	public ResponseEntity<?> getAnswerExplain(@PathVariable(value = "sessionId") String sessionId,
+			@RequestParam(value = "agentId") Long agentId,
+			@PathVariable(value = "runtimeRequestId") String runtimeRequestId) {
+		chatSessionService.requireSessionForAgent(sessionId, agentId);
+		return answerTraceExplainStore.getExplain(sessionId, runtimeRequestId)
+			.<ResponseEntity<?>>map(ResponseEntity::ok)
+			.or(() -> loadPersistedAnswerExplain(sessionId, runtimeRequestId, agentId).map(ResponseEntity::ok))
+			.orElseGet(() -> ResponseEntity.notFound().build());
+	}
+
+	private java.util.Optional<JsonNode> loadLatestPersistedAnswerExplain(String sessionId, Long agentId) {
+		List<ChatMessage> snapshots = chatMessageService.findBySessionIdAndMessageType(sessionId,
+				ANSWER_EXPLAIN_MESSAGE_TYPE, agentId);
+		JsonNode latestExplainNode = null;
+		long latestUpdatedAt = Long.MIN_VALUE;
+		for (ChatMessage snapshot : snapshots) {
+			if (snapshot == null || !StringUtils.hasText(snapshot.getContent())) {
+				continue;
+			}
+			try {
+				JsonNode explainNode = objectMapper.readTree(snapshot.getContent());
+				long updatedAt = explainNode.path("updatedAt").asLong(Long.MIN_VALUE);
+				if (latestExplainNode == null || updatedAt >= latestUpdatedAt) {
+					latestExplainNode = explainNode;
+					latestUpdatedAt = updatedAt;
+				}
+			}
+			catch (Exception ex) {
+				log.warn("Failed to parse persisted answer explain snapshot. sessionId={}, messageId={}", sessionId,
+						snapshot.getId(), ex);
+			}
+		}
+		return java.util.Optional.ofNullable(latestExplainNode);
+	}
+
+	private java.util.Optional<JsonNode> loadPersistedAnswerExplain(String sessionId, String runtimeRequestId,
+			Long agentId) {
+		if (!StringUtils.hasText(sessionId) || !StringUtils.hasText(runtimeRequestId)) {
+			return java.util.Optional.empty();
+		}
+		List<ChatMessage> snapshots = chatMessageService.findBySessionIdAndMessageType(sessionId,
+				ANSWER_EXPLAIN_MESSAGE_TYPE, agentId);
+		for (ChatMessage snapshot : snapshots) {
+			if (snapshot == null || !StringUtils.hasText(snapshot.getContent())) {
+				continue;
+			}
+			try {
+				JsonNode explainNode = objectMapper.readTree(snapshot.getContent());
+				if (runtimeRequestId.equals(explainNode.path("runtimeRequestId").asText())) {
+					return java.util.Optional.of(explainNode);
+				}
+			}
+			catch (Exception ex) {
+				log.warn("Failed to parse persisted answer explain snapshot. sessionId={}, messageId={}", sessionId,
+						snapshot.getId(), ex);
+			}
+		}
+		return java.util.Optional.empty();
 	}
 
 	/**
@@ -123,7 +217,7 @@ public class ChatController {
 	 */
 	@PostMapping("/sessions/{sessionId}/messages")
 	public ResponseEntity<ChatMessage> saveMessage(@PathVariable(value = "sessionId") String sessionId,
-			@RequestBody ChatMessageDTO request) {
+			@RequestParam(value = "agentId") Long agentId, @RequestBody ChatMessageDTO request) {
 		try {
 			if (request == null) {
 				return ResponseEntity.badRequest().build();
@@ -136,16 +230,19 @@ public class ChatController {
 				.metadata(request.getMetadata())
 				.build();
 
-			ChatMessage savedMessage = chatMessageService.saveMessage(message);
+			ChatMessage savedMessage = chatMessageService.saveMessage(message, agentId);
 
 			// Update session activity time
-			chatSessionService.updateSessionTime(sessionId);
+			chatSessionService.updateSessionTime(sessionId, agentId);
 
-			if (request.isTitleNeeded()) {
+			if (shouldGenerateTitle(request, savedMessage)) {
 				sessionTitleService.scheduleTitleGeneration(sessionId, message.getContent());
 			}
 
 			return ResponseEntity.ok(savedMessage);
+		}
+		catch (ResponseStatusException ex) {
+			throw ex;
 		}
 		catch (Exception e) {
 			log.error("Save message error for session {}: {}", sessionId, e.getMessage(), e);
@@ -158,11 +255,14 @@ public class ChatController {
 	 */
 	@PutMapping("/sessions/{sessionId}/pin")
 	public ResponseEntity<ApiResponse> pinSession(@PathVariable(value = "sessionId") String sessionId,
-			@RequestParam(value = "isPinned") Boolean isPinned) {
+			@RequestParam(value = "agentId") Long agentId, @RequestParam(value = "isPinned") Boolean isPinned) {
 		try {
-			chatSessionService.pinSession(sessionId, isPinned);
+			chatSessionService.pinSession(sessionId, isPinned, agentId);
 			String message = isPinned ? "会话已置顶" : "会话已取消置顶";
 			return ResponseEntity.ok(ApiResponse.success(message));
+		}
+		catch (ResponseStatusException ex) {
+			throw ex;
 		}
 		catch (Exception e) {
 			log.error("Pin session error for session {}: {}", sessionId, e.getMessage(), e);
@@ -175,14 +275,17 @@ public class ChatController {
 	 */
 	@PutMapping("/sessions/{sessionId}/rename")
 	public ResponseEntity<ApiResponse> renameSession(@PathVariable(value = "sessionId") String sessionId,
-			@RequestParam(value = "title") String title) {
+			@RequestParam(value = "agentId") Long agentId, @RequestParam(value = "title") String title) {
 		try {
 			if (!StringUtils.hasText(title)) {
 				return ResponseEntity.badRequest().body(ApiResponse.error("标题不能为空"));
 			}
 
-			chatSessionService.renameSession(sessionId, title.trim());
+			chatSessionService.renameSession(sessionId, title.trim(), agentId);
 			return ResponseEntity.ok(ApiResponse.success("会话已重命名"));
+		}
+		catch (ResponseStatusException ex) {
+			throw ex;
 		}
 		catch (Exception e) {
 			log.error("Rename session error for session {}: {}", sessionId, e.getMessage(), e);
@@ -194,10 +297,14 @@ public class ChatController {
 	 * Delete a single session
 	 */
 	@DeleteMapping("/sessions/{sessionId}")
-	public ResponseEntity<ApiResponse> deleteSession(@PathVariable(value = "sessionId") String sessionId) {
+	public ResponseEntity<ApiResponse> deleteSession(@PathVariable(value = "sessionId") String sessionId,
+			@RequestParam(value = "agentId") Long agentId) {
 		try {
-			chatSessionService.deleteSession(sessionId);
+			chatSessionService.deleteSession(sessionId, agentId);
 			return ResponseEntity.ok(ApiResponse.success("会话已删除"));
+		}
+		catch (ResponseStatusException ex) {
+			throw ex;
 		}
 		catch (Exception e) {
 			log.error("Delete session error for session {}: {}", sessionId, e.getMessage(), e);
@@ -210,11 +317,12 @@ public class ChatController {
 	 */
 	@PostMapping("/sessions/{sessionId}/reports/html")
 	public ResponseEntity<byte[]> convertAndDownloadHtml(@PathVariable(value = "sessionId") String sessionId,
-			@RequestBody String content) {
+			@RequestParam(value = "agentId") Long agentId, @RequestBody String content) {
 		try {
 			if (!StringUtils.hasText(content)) {
 				return ResponseEntity.badRequest().build();
 			}
+			chatSessionService.requireSessionForAgent(sessionId, agentId);
 			log.debug("Download HTML report for session {}", sessionId);
 			StringBuilder htmlContent = new StringBuilder();
 			htmlContent.append(reportTemplateUtil.getHeader());
@@ -227,10 +335,27 @@ public class ChatController {
 			headers.setContentDispositionFormData("attachment", filename);
 			return ResponseEntity.ok().headers(headers).body(htmlContent.toString().getBytes(StandardCharsets.UTF_8));
 		}
+		catch (ResponseStatusException ex) {
+			throw ex;
+		}
 		catch (Exception e) {
 			log.error("Download HTML report error for session {}: {}", sessionId, e.getMessage(), e);
 			return ResponseEntity.internalServerError().build();
 		}
+	}
+
+	private boolean shouldGenerateTitle(ChatMessageDTO request, ChatMessage savedMessage) {
+		if (request == null || savedMessage == null) {
+			return false;
+		}
+		if (request.isTitleNeeded()) {
+			return true;
+		}
+		if (!"user".equalsIgnoreCase(request.getRole())) {
+			return false;
+		}
+		List<ChatMessage> sessionMessages = chatMessageService.findBySessionId(savedMessage.getSessionId());
+		return sessionMessages.size() == 1;
 	}
 
 }

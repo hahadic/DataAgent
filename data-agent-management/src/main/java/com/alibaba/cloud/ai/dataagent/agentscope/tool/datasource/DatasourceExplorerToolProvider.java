@@ -15,7 +15,11 @@
  */
 package com.alibaba.cloud.ai.dataagent.agentscope.tool.datasource;
 
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
+import com.alibaba.cloud.ai.dataagent.agentscope.runtime.ToolContextRequestResolver;
 import com.alibaba.cloud.ai.dataagent.agentscope.tool.AgentScopedToolProvider;
+import com.alibaba.cloud.ai.dataagent.agentscope.tool.ToolError;
+import com.alibaba.cloud.ai.dataagent.agentscope.tool.ToolErrorCode;
 import com.alibaba.cloud.ai.dataagent.entity.AgentDatasource;
 import com.alibaba.cloud.ai.dataagent.entity.Datasource;
 import com.alibaba.cloud.ai.dataagent.service.datasource.AgentDatasourceService;
@@ -48,35 +52,26 @@ public class DatasourceExplorerToolProvider implements AgentScopedToolProvider {
 			        "PREVIEW_ROWS",
 			        "SEARCH"
 			      ],
-			      "description": "探索动作。推荐顺序：LIST_TABLES -> GET_TABLE_SCHEMA -> PREVIEW_ROWS/SEARCH"
+			      "description": "探索动作。"
 			    },
 			    "query": {
 			      "type": "string",
-			      "description": "用于 FIND_TABLES 的检索关键词"
+			      "description": "FIND_TABLES 时必填，用于按关键词查找表。"
 			    },
 			    "tableName": {
 			      "type": "string",
-			      "description": "目标表名。GET_TABLE_SCHEMA / GET_RELATED_TABLES / PREVIEW_ROWS 必填"
-			    },
-			    "tableNames": {
-			      "type": "array",
-			      "items": {
-			        "type": "string"
-			      },
-			      "description": "可选表名列表。当前版本主要使用单表"
+			      "description": "GET_TABLE_SCHEMA、GET_RELATED_TABLES、PREVIEW_ROWS 时必填的目标表名。"
 			    },
 			    "sql": {
 			      "type": "string",
-			      "description": "SEARCH 动作需要的只读 SQL。仅允许 SELECT/WITH"
+			      "description": "SEARCH 时必填的只读 SQL，仅允许 SELECT/WITH。"
 			    },
 			    "limit": {
 			      "type": "integer",
-			      "description": "返回行数上限，默认 20，最大 200"
+			      "description": "可选返回上限，默认 20，最大 200。"
 			    }
 			  },
-			  "required": [
-			    "action"
-			  ]
+			  "required": ["action"]
 			}
 			""";
 
@@ -132,13 +127,15 @@ public class DatasourceExplorerToolProvider implements AgentScopedToolProvider {
 		String visibleTables = selectedTables.isEmpty() ? "当前未显式选表，将回退到数据源全部可见表" : "当前显式选表 %d 个：%s"
 			.formatted(selectedTables.size(), String.join(", ", selectedTables.stream().limit(8).toList()));
 		return """
-				Unified explorer for datasource '%s' (%s).
-				Use this tool to inspect tables, inspect schema, preview rows, and execute readonly SQL search.
-				Constraints:
-				1. Only the current agent's active datasource is visible.
-				2. Only readonly SQL is allowed for SEARCH.
-				3. Recommended call order: LIST_TABLES -> GET_TABLE_SCHEMA -> PREVIEW_ROWS -> SEARCH.
-				4. %s
+				数据源'%s'（%s）的统一探索工具。
+				可用于查看表列表、查找表、查看单表结构、查看关系、按需预览样例数据，以及执行只读 SQL 查询。
+				约束说明：
+				1. 只能访问当前 Agent 的活动数据源。
+				2. SEARCH 仅允许执行只读 SQL。
+				3. 如果只需要定位表，优先使用 LIST_TABLES 或 FIND_TABLES。
+				4. 如果需要写 SQL，先获取表结构和关系，再决定是否执行 SEARCH。
+				5. PREVIEW_ROWS 不是默认前置动作，只有样例值会实质影响 SQL 写法时才使用。
+				6. %s
 				""".formatted(datasource.getName(), datasource.getType(), visibleTables);
 	}
 
@@ -167,18 +164,55 @@ public class DatasourceExplorerToolProvider implements AgentScopedToolProvider {
 
 		@Override
 		public String call(String toolInput) {
-			try {
-				DatasourceExplorerRequest request = objectMapper.readValue(toolInput, DatasourceExplorerRequest.class);
-				return objectMapper.writeValueAsString(datasourceExplorerService.execute(agentId, request));
-			}
-			catch (Exception ex) {
-				throw new IllegalStateException("Datasource explorer tool failed: " + ex.getMessage(), ex);
-			}
+			return call(toolInput, null);
 		}
 
 		@Override
 		public String call(String toolInput, ToolContext toolContext) {
-			return call(toolInput);
+			try {
+				DatasourceExplorerRequest request = objectMapper.readValue(toolInput, DatasourceExplorerRequest.class);
+				validateRequest(request);
+				AgentRequest agentRequest = ToolContextRequestResolver.resolveGraphRequest(toolContext);
+				return objectMapper
+					.writeValueAsString(datasourceExplorerService.execute(agentId, request, agentRequest));
+			}
+			catch (Exception ex) {
+				throw new IllegalStateException(
+						objectToJson(ToolError.of(ToolErrorCode.EXECUTION_FAILED, "数据源探索工具执行失败：" + ex.getMessage())),
+						ex);
+			}
+		}
+
+		private void validateRequest(DatasourceExplorerRequest request) {
+			if (request == null || request.getAction() == null) {
+				throw new IllegalArgumentException(
+						objectToJson(ToolError.of(ToolErrorCode.INVALID_INPUT, "数据源探索工具需要 action 参数")));
+			}
+			switch (request.getAction()) {
+				case FIND_TABLES -> requireText(request.getQuery(), "FIND_TABLES 需要 query 参数");
+				case GET_TABLE_SCHEMA, GET_RELATED_TABLES, PREVIEW_ROWS ->
+					requireText(request.getTableName(), request.getAction().name() + " 需要 tableName 参数");
+				case SEARCH -> requireText(request.getSql(), "SEARCH 需要 sql 参数");
+				case LIST_TABLES -> {
+				}
+				default -> throw new IllegalArgumentException(objectToJson(
+						ToolError.of(ToolErrorCode.UNSUPPORTED_ACTION, "不支持的数据源探索动作：" + request.getAction())));
+			}
+		}
+
+		private void requireText(String value, String message) {
+			if (!StringUtils.isNotBlank(value)) {
+				throw new IllegalArgumentException(objectToJson(ToolError.of(ToolErrorCode.INVALID_INPUT, message)));
+			}
+		}
+
+		private String objectToJson(Object value) {
+			try {
+				return objectMapper.writeValueAsString(value);
+			}
+			catch (Exception ex) {
+				return "{\"code\":\"EXECUTION_FAILED\",\"message\":\"工具错误序列化失败\"}";
+			}
 		}
 
 	}

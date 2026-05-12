@@ -15,9 +15,9 @@
  */
 package com.alibaba.cloud.ai.dataagent.controller;
 
-import com.alibaba.cloud.ai.dataagent.agentscope.dto.GraphRequest;
+import com.alibaba.cloud.ai.dataagent.agentscope.dto.AgentRequest;
 import com.alibaba.cloud.ai.dataagent.agentscope.service.AgentService;
-import com.alibaba.cloud.ai.dataagent.agentscope.vo.GraphNodeResponse;
+import com.alibaba.cloud.ai.dataagent.agentscope.vo.AgentResponse;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -28,8 +28,11 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
+import com.alibaba.cloud.ai.dataagent.service.chat.ChatSessionService;
+import org.springframework.http.HttpStatus;
 
 import static com.alibaba.cloud.ai.dataagent.constant.Constant.STREAM_EVENT_COMPLETE;
 import static com.alibaba.cloud.ai.dataagent.constant.Constant.STREAM_EVENT_ERROR;
@@ -43,26 +46,33 @@ public class DataAgentController {
 
 	private final AgentService agentService;
 
+	private final ChatSessionService chatSessionService;
+
 	@GetMapping(value = "/stream/search", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-	public Flux<ServerSentEvent<GraphNodeResponse>> streamSearch(@RequestParam("agentId") String agentId,
-			@RequestParam(value = "threadId", required = false) String threadId, @RequestParam("query") String query,
+	public Flux<ServerSentEvent<AgentResponse>> streamSearch(@RequestParam("agentId") String agentId,
+			@RequestParam("threadId") String threadId,
+			@RequestParam(value = "runtimeRequestId", required = false) String runtimeRequestId,
+			@RequestParam("query") String query,
+			@RequestParam(value = "clarifyCheckEnabled", required = false) boolean clarifyCheckEnabled,
 			@RequestParam(value = "humanFeedback", required = false) boolean humanFeedback,
 			@RequestParam(value = "humanFeedbackContent", required = false) String humanFeedbackContent,
-			@RequestParam(value = "rejectedPlan", required = false) boolean rejectedPlan,
-			@RequestParam(value = "nl2sqlOnly", required = false) boolean nl2sqlOnly, ServerHttpResponse response) {
+			@RequestParam(value = "rejectedPlan", required = false) boolean rejectedPlan, ServerHttpResponse response) {
+		Long numericAgentId = parseAgentId(agentId);
+		chatSessionService.requireSessionForAgent(threadId, numericAgentId);
 		response.getHeaders().add("Cache-Control", "no-cache");
 		response.getHeaders().add("Connection", "keep-alive");
 		response.getHeaders().add("Access-Control-Allow-Origin", "*");
 
-		Sinks.Many<ServerSentEvent<GraphNodeResponse>> sink = Sinks.many().unicast().onBackpressureBuffer();
-		GraphRequest request = GraphRequest.builder()
+		Sinks.Many<ServerSentEvent<AgentResponse>> sink = Sinks.many().unicast().onBackpressureBuffer();
+		AgentRequest request = AgentRequest.builder()
 			.agentId(agentId)
 			.threadId(threadId)
+			.runtimeRequestId(runtimeRequestId)
 			.query(query)
+			.clarifyCheckEnabled(clarifyCheckEnabled)
 			.humanFeedback(humanFeedback)
 			.humanFeedbackContent(humanFeedbackContent)
 			.rejectedPlan(rejectedPlan)
-			.nl2sqlOnly(nl2sqlOnly)
 			.build();
 		agentService.graphStreamProcess(sink, request);
 
@@ -87,6 +97,15 @@ public class DataAgentController {
 				}
 			})
 			.doOnComplete(() -> log.info("Aiagent stream completed successfully, threadId: {}", request.getThreadId()));
+	}
+
+	private Long parseAgentId(String agentId) {
+		try {
+			return Long.valueOf(agentId);
+		}
+		catch (NumberFormatException ex) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "agentId must be numeric", ex);
+		}
 	}
 
 }

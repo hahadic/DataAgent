@@ -24,7 +24,7 @@ import lombok.Data;
 @Builder
 public class SemanticModelSearchResult {
 
-	private String query;
+	private String resolution;
 
 	private String summary;
 
